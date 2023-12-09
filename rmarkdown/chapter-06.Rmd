@@ -1,0 +1,247 @@
+---
+title: "Regularized Regression"
+output: html_document
+date: "2023-11-05"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Prerequisites
+
+The book covers the `glmnet` package, interacting directly with it. As usual I'll leverage `tidymodels` package to develop the examples.
+
+I won't load the package so as to emphasise where the different functions belong to.
+
+```{r}
+library(tidyverse)
+```
+
+## Why regularize
+
+The motivation to regularize comes from the Ordinary Least Squares models that have a large number of predictors. Classical Linear Models work well under certain assumptions such as hocedasticity (constant variance of the error terms), but these assumptions tend to break in the pressence of a large number of predictors.
+
+Another problem is that of multilinearity, or high correlation amongst predictors. This usually results in large coefficients that introduce high variance in the predictors. 
+
+One solution to these problems is the reduction of the number of features in the model, known as feature selection. This selection can be done through *hard thresholding*, where a feature is either included or not, or *soft thresholding*, where features are weighted down admitting different weights in the model.
+
+Regularization is a technique to introduce feature selection. While classical linear regression models minimise SSE (sum of squared errors), regularized models aim to minimise SSE and a penalty term P.
+
+$$minimize(SSE + P)$$
+
+There are three main types of penalty parameters:
+
+1. Ridge
+1. Lasso
+1. Elastec net (or ENET), which is a combination of Ridge and Lasso
+
+### Ridge penalty
+
+
+
+```{r}
+data(ames, package = "modeldata")
+
+set.seed(123)
+
+ames_split_01 <- ames %>% rsample::initial_split(
+    prop = 0.7,
+    strata = Sale_Price)
+
+ames_train_01 <- ames_split_01 %>% 
+    rsample::training()
+
+ames_test_01 <- ames_split_01 %>% 
+    rsample::testing()
+
+rs_01 <- ames_train_01 %>% 
+    rsample::vfold_cv(
+        v = 10)
+```
+
+## Implementation
+
+The package `glmnet` requires that all predictors are numeric. Tidymodels doesn't take care of this automatically and so steps for encoding non-numeric variables are required.
+
+Similarly numeric predictors need to be normalised to ensure that they're treated fairly by the model.
+
+```{r}
+wf_01 <- workflows::workflow()
+
+recipe_01 <- recipes::recipe(
+    Sale_Price ~ .,
+    data = ames_train_01) %>% 
+    recipes::step_dummy(
+        recipes::all_nominal_predictors()) %>% 
+    recipes::step_zv(
+        recipes::all_predictors()) %>% 
+    recipes::step_normalize(
+        recipes::all_predictors())
+    
+prep_01 <- recipe_01 %>% 
+    recipes::prep()
+
+wf_02 <- wf_01 %>% 
+    workflows::add_recipe( 
+        prep_01)
+```
+
+A linear regression model that uses regularization requires additional parameters `penalty` and `mixture`. `penalty` determines the level of regularization, while `mixture` determines the type of regularization. A value of `0` corresponds to a pure ridge model while a value of `1` corresponds to a pure lasso model. Values between `0` and `1` will mix both effects (`elastic net`). 
+
+The values `penalty` and `mixture` are hyperparameters, that is, they cannot be determined solely by the data itself. They're well suited for tuning. 
+
+### `glmnet` engine implementation
+
+One important aspect of the `glmnet` package is that every time it is fit it uses a so-called regularization path. This is a discrete set of values for the penalty factor, called `lambda` in the `glmnet` package.
+
+Even when a user configures a linear regression model with the `glmnet` engine and a value of `penalty` in the `linear_regression` specification, the `glmnet` engine might not include this value. The engine resources internally to interpolation to solve this problem.
+
+However to simplify analysis and make it possible to still use the `broom` package to inspect coefficients for example, there is an engine specific option called `path_values` that can take a prespecified set of values for its `lambda` parameter.
+
+```{r}
+penalty_path <- 
+    10^seq(-10, 0, length.out = 101)
+
+model_01 <- 
+    parsnip::linear_reg(   
+        penalty = tune(),  
+        mixture = tune()) %>%  
+    parsnip::set_engine(
+        "glmnet",
+        path_values = penalty_path) %>% 
+    parsnip::set_mode("regression")
+
+wf_03 <- wf_02 %>% 
+    workflows::add_model(
+        model_01)
+```
+
+Now we can define the grid that will be used for tuning leveraging the set of penalty values defined above.
+
+```{r}
+parameters_01 <- wf_03 %>% 
+    workflows::extract_parameter_set_dials()
+
+grid_01 <- 
+    crossing(
+        penalty = sample(
+            penalty_path,
+            size = 10),
+        mixture = 
+            seq(0, 1, length.out = 5))
+```
+
+We can tune the model by fitting it along the grid.
+
+```{r}
+cg_01 <- tune::control_grid(
+    verbose = TRUE)
+
+cv_01 <- wf_03 %>% 
+    tune::tune_grid(
+        resamples = rs_01,
+        grid = grid_01,
+        control = cg_01)
+```
+
+We select the best configuration and we finalize the model with these values.
+
+```{r}
+cv_01 %>% 
+    tune::show_best(
+        metric = "rmse",
+        n = 5)
+
+best_tune <- cv_01 %>% 
+    tune::select_best(
+        metric = "rmse")
+
+wf_04 <- wf_03 %>% 
+    tune::finalize_workflow(
+        parameters = best_tune)
+```
+
+Normally we would be comparing this model against others. Since we cannot use our test set until we have a champion model, we would be measuring performance against a validation set instead. In this case we can measure performance against the test set.
+
+```{r}
+wf_05 <- wf_04 %>% 
+    tune::last_fit(
+        split = ames_split_01)
+
+wf_05 %>% 
+    tune::collect_metrics()
+```
+
+## Evaluate coefficients
+
+It's interesting to understand how the regularization has impacted the coefficients. Let's look at the coefficients with the `broom` package.
+
+```{r}
+fit_engine <- wf_05 %>% 
+    workflows::extract_fit_engine()
+
+fit_engine %>% 
+    broom::tidy()
+```
+
+We see that the tibble shows all potential values of lambda used by the `glmnet` package. However, since we've run the grid over a subset of the values in the regularization path, it will be possible to filter in only those related to our selected parameters.
+
+```{r}
+fit_coeffs_01 <- fit_engine %>% 
+    broom::tidy() %>% 
+    filter(
+        lambda == best_tune$penalty)
+
+fit_coeffs_01
+```
+
+Is there any coefficient with a zero value?
+
+```{r}
+fit_coeffs_01 %>% 
+    count(
+        near(estimate, 0))
+```
+
+In this case every coefficient has an estimate value. Since the predictors had been normalised, the size of the coefficient tells us about the importance of the coefficient.
+
+```{r}
+fit_coeffs_01 %>% 
+    ggplot(aes(x = estimate)) + 
+    geom_histogram(bins = 100)
+```
+
+Clearly many coefficients have almost zero values.
+
+```{r}
+fit_coeffs_01 %>% 
+    arrange(
+        desc(abs(estimate)))
+
+fit_engine %>% 
+    vip::vip()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

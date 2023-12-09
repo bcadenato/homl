@@ -1,0 +1,285 @@
+---
+title: "Logistic Regression"
+output: html_document
+date: "2023-10-30"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Prerequisites
+
+We'll load basic libraries, while calling explicitly functions from other modules to reinforce where functions come from.
+
+```{r}
+library(tidyverse)
+```
+
+We'll use the employee attrition dataset.
+
+```{r}
+data(attrition, package = "modeldata")
+
+df <- attrition %>% 
+    as_tibble() %>% 
+    mutate(
+        across( 
+            where(is.ordered), 
+            factor,  
+            ordered = FALSE))
+
+set.seed(123)
+
+churn_split <- rsample::initial_split(
+    df,
+    prop = .7,
+    strata = "Attrition")
+
+churn_train <- rsample::training(churn_split)
+churn_test <- rsample::testing(churn_split)
+```
+
+## Why logistic regression
+
+Logistic regression is a variation over linear regression for cases where the predicted variable has some additional restrictions, such as being a probability between 0 and 1. More information can be found in [Logistic regression](https://en.wikipedia.org/wiki/Logistic_regression).
+
+## Simple logistic regression
+
+We will use `glm` (generalized linear models, more information can be found in [Generalized linear model](https://en.wikipedia.org/wiki/Generalized_linear_model)). We will fit two models to predict the `Attrition` variable. The first one will consider as a predictor the montly income of employees (`MonthlyIncome`) and the second one will consider whethe or not the employee works overtime (`OverTime`). The book uses `glm` directly, but in this case we will use `tidymodels`.
+
+```{r}
+form_1 <- Attrition ~ MonthlyIncome
+form_2 <- Attrition ~ OverTime
+
+model_base <- parsnip::logistic_reg() %>% 
+    parsnip::set_engine("glm") %>% 
+    parsnip::set_mode("classification")
+
+wf_1 <- workflows::workflow() %>% 
+    workflows::add_formula(form_1) %>% 
+    workflows::add_model(model_base) %>% 
+    parsnip::fit(
+        data = churn_train)
+
+wf_2 <- workflows::workflow() %>% 
+    workflows::add_formula(form_2) %>% 
+    workflows::add_model(model_base) %>% 
+    parsnip::fit(
+        data = churn_train)
+```
+
+If we wanted to see the predicted probabilities:
+
+```{r}
+wf_1 %>% 
+    broom::augment(
+        churn_train) %>% 
+    ggplot(
+        aes(MonthlyIncome, .pred_Yes)) +
+    geom_line()
+```
+
+
+```{r}
+wf_2 %>% 
+    broom::augment(
+        churn_train) %>% 
+    distinct(
+        OverTime,
+        .pred_Yes) %>% 
+    ggplot(
+        aes(OverTime, .pred_Yes)) +
+    geom_col()
+
+wf_2 %>% 
+    broom::augment(
+        churn_train) %>% 
+    ggplot(
+        aes(OverTime, .pred_Yes)) + 
+    geom_point(position = "jitter")
+```
+
+The estimated coefficients can be retrieved with `broom::tidy`.
+
+```{r}
+wf_1 %>% 
+    broom::tidy()
+```
+
+The coefficientes are easier to understand with exponentiation.
+
+```{r}
+wf_1 %>% 
+    broom::tidy(
+        exponentiate = TRUE)
+```
+
+Same with the second model.
+
+```{r}
+wf_2 %>% 
+    broom::tidy()
+
+wf_2 %>% 
+    broom::tidy(
+        exponentiate = TRUE)
+```
+
+Exponentiation of the coefficients gives the increase in odds for the predicted event when the predictor changes.
+
+## Multiple logistic regression
+
+We can model `Attrition` based on both `MonthlyIncome` and `OverTime`.
+
+```{r}
+form_3 <- Attrition ~ MonthlyIncome + OverTime
+
+wf_3 <- workflows::workflow() %>% 
+    workflows::add_formula(form_3) %>% 
+    workflows::add_model(model_base) %>% 
+    parsnip::fit(data = churn_train)
+
+wf_3 %>% 
+    broom::tidy(
+        exponentiate = TRUE)
+```
+
+```{r}
+wf_3 %>% 
+    broom::augment(churn_train) %>% 
+    mutate(Attrition_prob = if_else(Attrition == "Yes", 1, 0)) %>% 
+    ggplot(
+        aes(MonthlyIncome, .pred_Yes, colour = OverTime)) + 
+    geom_line() +
+    geom_point(
+        aes(MonthlyIncome, Attrition_prob, colour = OverTime),
+        alpha = 0.5)
+```
+
+## Assessing model accuracy
+
+To assess accuracy of our model without touching the test data set, we'll create some resamples and measure performance on those.
+
+```{r}
+churn_resamples <- rsample::vfold_cv(
+    data = churn_train,
+    v = 10)
+
+wf_rs_1 <- wf_1 %>% 
+    tune::fit_resamples(
+        resamples = churn_resamples,
+        control = tune::control_resamples(save_pred = TRUE))
+
+wf_rs_2 <- wf_2 %>% 
+    tune::fit_resamples(
+        resamples = churn_resamples,
+        control = tune::control_resamples(save_pred = TRUE))
+
+wf_rs_3 <- wf_3 %>% 
+    tune::fit_resamples(
+        resamples = churn_resamples,
+        control = tune::control_resamples(save_pred = TRUE))
+
+form_4 <- Attrition ~ .
+
+wf_rs_4 <- workflows::workflow() %>% 
+    workflows::add_formula(form_4) %>% 
+    workflows::add_model(model_base) %>% 
+    tune::fit_resamples(
+        resamples = churn_resamples,
+        control = tune::control_resamples(save_pred = TRUE))
+```
+
+We can now compare the models.
+
+```{r}
+wf_rs_1 %>% 
+    tune::collect_predictions() %>% 
+    yardstick::conf_mat(
+        Attrition,
+        .pred_class)
+
+wf_rs_2 %>% 
+    tune::collect_predictions() %>% 
+    yardstick::conf_mat(
+        Attrition,
+        .pred_class)
+
+wf_rs_3 %>% 
+    tune::collect_predictions() %>% 
+    yardstick::conf_mat(
+        Attrition,
+        .pred_class)
+
+wf_rs_4 %>% 
+    tune::collect_predictions() %>% 
+    yardstick::conf_mat(
+        Attrition,
+        .pred_class)
+```
+
+The only model of these that considers classifying an outcome as a Yes is the last one that used every possible feature. Let's see the ROC curve for this model.
+
+```{r}
+wf_rs_4 %>% 
+    tune::collect_predictions() %>% 
+    yardstick::roc_curve(Attrition, .pred_No) %>% 
+    autoplot()
+```
+
+## Feature interpretation
+
+Let's do the final fit of our model
+
+```{r}
+wf_final <- workflows::workflow() %>% 
+    workflows::add_formula(form_4) %>% 
+    workflows::add_model(model_base) %>% 
+    tune::last_fit(
+        churn_split)
+```
+
+Finally let's use the `vip` package to extract the most significant features in the model according to their coefficients.
+
+```{r}
+vip::vip(
+    wf_final %>% 
+        workflows::extract_fit_engine())
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

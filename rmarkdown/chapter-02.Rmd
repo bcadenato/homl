@@ -1,0 +1,229 @@
+---
+title: "Chapter 02"
+output: html_document
+date: "2023-09-10"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+The book works with several frameworks to illustrate the concepts. One of the frameworks is based in the tidyverse developed by Hadley Wikham, Kuhn and Julia Silge.
+
+```{r echo=TRUE}
+library(tidyverse)
+```
+
+The second chapter explains the general workflow that includes:
+
+1. Preparing your data through sampling.
+1. Training your model.
+1. Tuning your model.
+1. Evaluating performance of your model.
+
+## Sample data
+
+The chapter works with two datasets. The first one is the Ames dataset with housing prices.
+
+```{r}
+ames <- AmesHousing::make_ames()
+```
+
+The second set is a dataset with attrition data for a company.
+
+```{r}
+churn <- modeldata::attrition %>% 
+    as_tibble()
+```
+
+
+## Preparing the data
+
+The package `rsample` can be used to prepare your data in a train and a test set. 
+
+```{r}
+split_01 <- ames %>% rsample::initial_split(prop = 0.7)
+
+train_01 <- split_01 %>% rsample::training()
+test_01 <- split_01 %>% rsample::testing()
+```
+
+The distribution of `Sale_Price` in the the original `ames` set and in the training set `train_01` is very similar.
+
+```{r}
+ggplot() +
+    geom_density(
+        data = ames,
+        mapping = aes(x = Sale_Price)) +
+    geom_density(
+        data = train_01,
+        mapping = aes(x = Sale_Price),
+        colour = "Red")
+```
+
+### Stratified sampling
+
+Stratified sampling is usually used in classification problems where the response variable may be imbalanced.
+
+```{r}
+split_strat_01 <- churn %>% 
+    rsample::initial_split(
+        prop = 0.7,
+        strata = "Attrition")
+
+train_strat_01 <- rsample::training(split_strat_01)
+test_strat_01 <- rsample::testing(split_strat_01)
+```
+
+## Creating models in R
+
+Models in R are traditionally created with a formula `response ~ attribute`, but some models also accept different specifications through variables. There are pros and cons for each approach.
+
+Formulas can be convenient to write, but any treatment of the data might need to be repeated in every run of the model.
+
+The biggest problem though is that each model might require its own set of specifications, and knowing these requires a high degree of familarity with the model. This problem is addressed by engines that introduce a level of abstraction over models. Two such packages are `caret` and `parsnip`. 
+
+## Resampling methods
+
+Resampling is a technique used to reduce variance and bias in the model solutions due to the training and test datasets split. There are two main techniques.
+
+The main concept is that the test set shouldn't be taken into account in the model evaluation process. Instead, when trying and optimising models for performance, a validation process should be carried over the training data. For this purpose you need to split again the training set into a training set and a validation (or hold-out) set.
+
+### k-fold cross validation
+
+k-fold cross-validation is a resampling method that randomly divides the training data into `k`groups (aka folds) of approximately equal size. 
+
+### Bootstrapping
+
+A bootstrap sample is a random sample of the data taken with replacement. On average ~ 63.21% of the original sample ends up in any particular bootstrap sample. The original observations not contained in a sample are considered out-of-bag (OOB).
+
+## Bias and variance trade-off
+
+Many models often present a trade-off between bias and variance. Linear models usually have low variance, but since they struggle to model non linear behaviours, they usually present high variance.
+
+Other models have the opposite problem. They are very flexible to replicate non-linear behaviours, but this comes at the cost of high variance (think overfitting) and bad generalization (performance with unseen models).
+
+Hyperparameters allow a model to be fine-tuned to find the sweet spot between bias and variance. There are optimizaiton techniques such as grid search to perform this tuning automatically.
+
+## Model evaluation
+
+Traditionally models were evaluated according to their goodness-of-fit and assessment of residuals. This concept has been generalised to consider other measures of performance via _loss-functions_. 
+
+The book discusses two types of loss functions for regression and classification models.
+
+In the case of classification models the book also explains the confusion matrix and the traditional measures of performance for classification models.
+
+## Putting everything together
+
+The chapter finishes with an end-to-end example of a model evaluation.
+
+First the Ames housing set is split into a training and test datasets.
+
+```{r}
+set.seed(123)
+
+ames_split_01 <- ames %>% rsample::initial_split(
+    prop = 0.7,
+    strata = Sale_Price)
+
+ames_train_01 <- ames_split_01 %>% 
+    rsample::training()
+
+ames_test_01 <- ames_split_01 %>% 
+    rsample::testing()
+```
+
+Using the modelling engine `caret` we prepare a resampling strategy with the function `trainControl`. 
+
+```{r}
+
+#Specify resampling strategy
+
+cv <- caret::trainControl(
+    method = "repeatedcv",
+    number = 10,
+    repeats = 5)
+```
+
+We prepare a grid search over the hyperparameter `k`. 
+
+```{r}
+
+# Create grid of hyperparameter values
+
+hyper_grid <- expand.grid(
+    k = seq(2, 25, by = 1))
+```
+
+Finally we ask the engine to fine-tune the model `knn` over the `ames_train_01` data set, and we give the model the following instructions for model performance:
+
+- A resampling strategy `cv`.
+- A grid for parameter optimisation `hyper_grid`.
+- A loss function `RMSE`.
+
+```{r cache=TRUE}
+
+# Tune a knn model using grid search
+
+knn_fit <- caret::train(
+    Sale_Price ~ .,
+    data = ames_train_01,
+    method = "knn",
+    trControl = cv,
+    tuneGrid = hyper_grid,
+    metric = "RMSE")
+```
+
+This gives an optimal value for `k` of 6.
+
+```{r}
+knn_fit
+
+ggplot(knn_fit)
+```
+
+This last section has illustrated the end-to-end process to fine-tune a model to find the best performing model. However it misses some important points:
+
+- It doesn't evaluate final model performance against the test set.
+- It doesn't consider feature and target engineering options.
+- It hasn't considered alternative models.
+
+# Data for the next chapter
+
+In the next chapter there are a few datasets from this chapeter that will still be used. We'll save these intermediate results in the folder `results`.
+
+```{r}
+ames_train_01 %>% write_rds("results/ch01_ames_train.rds")
+ames_test_01 %>% write_rds("results/ch01_ames_test.rds")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
