@@ -1,0 +1,252 @@
+---
+title: "Multivariate Adaptive Regression Splines"
+output: html_document
+date: "2023-12-28"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Summary of the model
+
+All models presented until now are based on the linear regression model, and as such have strong assumptions about the underlying variables. Either these variables are assumed to follow a linear model, or a transformation of thse variables is. 
+
+Multivariate Adaptive Regression Splines try to improve this assumption by representing the variable as a series of lines that are discontinuous at certain cutpoint values. 
+
+In order to find such a representation, an algorithm is run in succession. In each iteration the modelled variable is broken down into two lines that are joint at a cutpoint value. This cutpoint value and the slope of such lines is searched so as to minimise the sum of squared errors (SSE) with respect to the original variable. 
+
+The result of this search will be a non-linear equation made of piecewise linear functions that models the original variable, with low SSE. Since this process can be run for as many data points the original dataset has, there is a trade-off with the complexity of the process, and knots that do not add significant value are removed through an evaluation process.
+
+## Fitting a MARS model
+
+We'll start by loading the tidyverse metapackage, while calling every other package by name as usual.
+
+```{r}
+library(tidyverse)
+```
+
+We'll fit the Ames house dataset using the mars model.
+
+```{r}
+data(ames, package = "modeldata")
+
+set.seed(123)
+
+ames_split_01 <- ames %>% rsample::initial_split(
+    prop = 0.7,
+    strata = Sale_Price)
+
+ames_train_01 <- ames_split_01 %>% 
+    rsample::training()
+
+ames_test_01 <- ames_split_01 %>% 
+    rsample::testing()
+
+rs_01 <- ames_train_01 %>% 
+    rsample::vfold_cv(
+        v = 10)
+```
+
+The model requires that all predictors are numerical, so encoding of factor predictors is required. This is done automatically by the model, but we will do it with a recipe.
+
+```{r}
+recipe_01 <- 
+    recipes::recipe(
+        data = ames_train_01,
+        Sale_Price ~ .)
+
+recipe_02 <- 
+    recipe_01 %>% 
+    recipes::step_dummy(
+        recipes::all_nominal_predictors())
+```
+
+Since the original MARS algorithm is proprietary, there is a freely available implementation named earth in R. 
+
+The parsnip mars model specification requires three parameters as stated in the [documentation](https://parsnip.tidymodels.org/reference/details_mars_earth.html).
+
+```{r}
+model_01 <- 
+    parsnip::mars(
+        num_terms = tune(),
+        prod_degree = 1L,
+        prune_method = "backward") %>% 
+    parsnip::set_engine("earth") %>% 
+    parsnip::set_mode("regression")
+```
+
+We can create now a workflow with the recipe preprocessor and the model specification.
+
+```{r}
+wf_01 <- 
+    workflows::workflow(
+        preprocessor = recipe_02,
+        spec = model_01)
+```
+
+### Model tuning
+
+Since we've set the `num_terms` parameter for tuning, we can look into it to understand the range of values under consideration. 
+
+```{r}
+wf_01 %>% 
+    workflows::extract_parameter_set_dials()
+
+wf_01 %>% 
+    workflows::extract_parameter_dials("num_terms")
+```
+
+We'll set a broader range for the number of terms.
+
+```{r}
+params_01 <- 
+    wf_01 %>% 
+    workflows::extract_parameter_set_dials() %>% 
+    update(
+        "num_terms" = dials::num_terms(c(2, 200)))
+
+params_01 %>% 
+    dials::extract_parameter_dials("num_terms")
+```
+
+We can now create a grid using the `dials` package.
+
+```{r}
+grid_01 <- 
+    params_01 %>% 
+    dials::grid_regular(
+        levels = 10)
+
+control_grid_01 <- 
+    tune::control_grid(
+        verbose = TRUE)
+```
+
+We can finally tune the model.
+
+```{r}
+metrics_01 <- 
+    yardstick::metric_set(
+    yardstick::rmse,
+    yardstick::rsq)
+
+mars_tune_01 <- 
+    wf_01 %>% 
+    tune::tune_grid(
+        resamples = rs_01,
+        grid = grid_01,
+        metrics = metrics_01,
+        control = control_grid_01)
+```
+
+### Finalise the model
+
+```{r}
+best_param_01 <- 
+    mars_tune_01 %>% 
+    tune::select_best(
+        metric = "rmse")
+
+wf_02 <- 
+    wf_01 %>% 
+    tune::finalize_workflow(
+        parameters = best_param_01)
+```
+
+We fit the last model
+
+```{r}
+wf_03 <- 
+    wf_02 %>% 
+    tune::last_fit(
+        split = ames_split_01)
+```
+
+We evaluate the performance of the model against the test set.
+
+```{r}
+wf_03 %>% 
+    tune::collect_metrics()
+```
+
+## Understand the model
+
+We've fit the model. Now we can ask about the features that are more relevant for the model, as well as how the model has processed the variables.
+
+```{r}
+fit_engine_01 <- 
+    wf_03 %>% 
+    workflows::extract_fit_engine()
+
+fit_engine_01
+```
+
+The model `earth` doesn't include an implementation of the `tidy` function. Alternatively the `summary` function provides the model coefficients.
+
+```{r}
+fit_engine_01 %>% 
+    summary(
+        details = TRUE)
+```
+
+The `earth` package includes the function `evimp` to understand the importance of variables under three different criteria implemented natively by the package. These criteria are:
+
+    - `nsubsets` - How many model subsets include the variable.
+    - `rss` - Sum of residual squares. The model implements a measure of improvement over this variable.
+    - `gcv` - Generalized Cross Validation. A measure of the performance over the model over unseen data.
+
+```{r}
+fit_engine_01 %>% 
+    earth::evimp(
+        trim = FALSE)
+```
+
+The function `vip` can show similar results.
+
+```{r}
+fit_engine_01 %>% 
+    vip::vip()
+```
+
+
+The function `plotmo` can also build a graph that shows how each response varies with the predictions.
+
+```{r}
+fit_engine_01 %>% 
+    plotmo()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
