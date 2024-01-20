@@ -1,0 +1,386 @@
+---
+title: "Feature & Target Engineering"
+output: html_document
+date: "2023-09-16"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Feature & Target Engineering
+
+We'll load the tidyverse package, but we'll explicitly name other packages to reinforce learning on their functions and package source.
+
+```{r echo=TRUE}
+# Helper packages
+library(tidyverse)
+```
+
+We'll use data from the previous chapter.
+
+```{r}
+ames_train <- read_rds("results/ch01_ames_train.rds")
+ames_test <- read_rds("results/ch01_ames_test.rds")
+```
+
+### Target engineering
+
+Parametric models usually expect certain properties in the underlying data, such as a normal distribution on the numeric features or target variables. When the actual distribution of the data is different from that of the model expectations, a transformation on the data can help bridge this gap.
+
+```{r echo=FALSE}
+ames_train_01 <- ames_train %>% 
+    mutate(
+        Sale_Price_Log = log(Sale_Price))
+
+ames_train_02 <- ames_train_01 %>% 
+    select(
+        Sale_Price, Sale_Price_Log) %>% 
+    pivot_longer(
+        cols = c(Sale_Price, Sale_Price_Log),
+        names_to = "Variable",
+        values_to = "Value")
+
+ames_train_02 %>% ggplot() +
+    geom_histogram(
+        mapping = aes(x = Value, fill = Variable), 
+        bins = 30) +
+    facet_grid(
+        ~ Variable,
+        scales = "free_x")
+```
+
+A log transformation won't work if there are negative values. There are a few other altenratives that can be used in that case like displacing the distribution if the negative values are very small (greater than -0.99 say), or Box Cox transformation.
+
+A log transformation can be implemented with the `recipes` package.
+
+```{r message=FALSE}
+ames_recipe <- recipes::recipe(
+    Sale_Price ~ .,
+    data = ames_train) %>% 
+    recipes::step_log(
+        recipes::all_outcomes())
+
+ames_recipe
+```
+
+### Dealing with missingness
+
+Data can be missing for many reasons, that are usually grouped into two categories: _Informative missingness_ and _missingness at random_.
+
+Informative missingness implies a structural cause for the missing value that can provide insight in its own right, whether this be deficiencies in how the data was collected or abnormalities in the observational environment. We might give these values their own category as their unique value may affect predictive performance.
+
+Missingness at random implies that missing values occur independent of the data collection process. These values might deserve deletion or imputation.
+
+Moreover missingness is a problem for many models that cannot handle missingness.
+
+### Visualising missing values
+
+Missing values can be visualized easily with data transformation. The package `visdat` also includes functionality for this.
+
+```{r}
+visdat::vis_miss(AmesHousing::ames_raw, cluster = TRUE)
+```
+
+#### Imputation
+
+Imputation is the process of replacing a missing value with a substituted, best guess value. This is one of the first feature engineering steps as it affects downstream processing.
+
+The main options discussed in the text are imputation of a statistic such as mean or median, k-nearest neighbour or using a tree. The trade-off is usually computational effort and accuracy / complexity.
+
+A critical aspect is that since imputation uses data from the set, it should always be used within the training set or the analysis set in the case of resampling.
+
+```{r message=FALSE}
+ames_recipe %>% 
+    recipes::step_impute_median(Gr_Liv_Area)
+
+ames_recipe %>% 
+    recipes::step_impute_knn(
+        recipes::all_predictors(),
+        neighbors = 6)
+
+ames_recipe %>% 
+    recipes::step_impute_bag(
+        recipes::all_predictors())
+```
+
+### Feature filtering
+
+There is a trade off between the number of features and the computational cost / easiness to interpret a model. Some models also show resistance to dealing with many features.
+
+Even if some models are not affected in their predictive performance by non-informative predictors, the time to train and maintain this models can negatively impacted.
+
+The first variables that should be removed are zero variance and near zero variance variables, which not bring significant information to the model.
+
+```{r}
+caret::nearZeroVar( 
+    ames_train,
+    saveMetrics = TRUE) %>% 
+    rownames_to_column() %>% 
+    filter(nzv)
+```
+
+The same flow couyld be done using the tidymodels package.
+
+```{r message=FALSE}
+ames_recipe_01 <- ames_recipe %>% 
+    recipes::step_nzv(recipes::all_predictors())
+
+ames_recipe_02 <- ames_recipe_01 %>% 
+    recipes::prep(retain = TRUE)
+
+ames_recipe_02 %>% 
+    recipes::tidy()
+
+ames_recipe_02 %>% 
+    recipes::tidy(
+        type = "nzv")
+```
+
+### Numeric feature engineering
+
+For the same reasons discussed on the target variable, skewness, outliers, and extreme distributions might affect the performance of parametric models.
+
+#### Skewness
+
+Same transformations as before, Box Cox and YeoJohnson can be used on numeric features to remove skewness.
+
+```{r message=FALSE}
+recipes::recipe(
+    Sale_Price ~ .,
+    data = ames_train) %>% 
+    recipes::step_YeoJohnson(
+        recipes::all_numeric())
+```
+
+#### Standardization
+
+Since some models apply functions over their inputs, they might be sensible to the magnitude of these inputs. Centering and variance scaling help these models.
+
+```{r message=FALSE}
+ames_recipe %>% 
+    recipes::step_center(
+        recipes::all_numeric()) %>% 
+    recipes::step_scale(
+        recipes::all_numeric())
+```
+
+### Categorical feature engineering
+
+Most models require that the predictors take numeric form. Moreover, manipulation on the categorical predictors might reduce the number of values and improving computational time, though sometimes at the expense of predictive performance.
+
+#### Lumping
+
+This is the practice of aggregating categories with very few categories together to create a new category which is more meaningful.
+
+```{r message=FALSE}
+ames_train %>% 
+    count(Neighborhood) %>% 
+    arrange(n)
+
+lumping <- recipes::recipe(
+    Sale_Price ~ .,
+    data = ames_train) %>% 
+    recipes::step_other(
+        Neighborhood,
+        threshold = 0.01,
+        other = "Other")
+
+ames_train_lumping <- lumping %>% 
+    recipes::prep(
+        training = ames_train) %>% 
+    recipes::bake(ames_train)
+
+ames_train_lumping %>% 
+    count(Neighborhood) %>% 
+    arrange(n)
+```
+
+#### One-hot & dummy encoding
+
+These are methods to transform categorical categories into numerical variables. One-hot transformation converts every category value into a less-than-full rank encoding, such as every value gets its own column, with a value of `1` if the observation has that value, or `0` otherwise.
+
+Since this introduces colinearity and this is a problem for some models, an alternative encoding is dummy encoding, that removes one column from the one-hot encoding.
+
+```{r message=FALSE}
+recipes::recipe(
+    Sale_Price ~ .,
+    data = ames_train) %>% 
+    recipes::step_dummy(
+        all_nominal(),
+        one_hot = TRUE)
+```
+
+#### Label encoding
+
+Dummy encoding creates new variables, that increase the dimensionality of the datasets. Label encoding instead transforms categories into numerical variables without increasing dimensionality. However this numerical transformation introduces an ordering to the feature.
+
+```{r}
+ames_train %>% 
+    count(MS_SubClass)
+
+ames_train %>% 
+    recipes::recipe(
+        Sale_Price ~ .) %>% 
+    recipes::step_integer(
+        MS_SubClass) %>% 
+    recipes::prep(
+        ames_train) %>% 
+    recipes::bake(
+        ames_train) %>% 
+    count(MS_SubClass)
+```
+
+### Dimension reduction
+
+Dimension reduction is an alternative to filter out non-informative features.
+
+```{r message=FALSE}
+ames_train %>%  
+    recipes::recipe(
+        Sale_Price ~ .) %>% 
+    recipes::step_center(
+        recipes::all_numeric()) %>% 
+    recipes::step_scale(
+        recipes::all_numeric()) %>% 
+    recipes::step_pca(
+        recipes::all_numeric(),
+        threshold = 0.95)
+```
+
+### Proper implementation
+
+Feature engineering should be though of as a blueprint to apply over the data (which is aligned with the metaphor used in the `recipes` package). This has two advantages, thinking sequentially and to apply appropriately within the resampling process.
+
+#### Sequential steps
+
+There are some general suggestions to follow when doing feature engineering.
+
+- If using a log or Box-Cox transformation, don't do any operations that might make the data non-positive.
+- Dummy encoding results in sparse data which many algorithms can operate efficiently on. Standardization has the result of creating dense data instead. Standardization is usually preferred before dummy encoding.
+- Lumping is better to be done before dummy encoding.
+- Dimension reduction is commonly done on numeric features.
+
+A suggested order of potential steps that usually work for most problems are:
+
+1. Filter out zero or near-zero variance features.
+1. Perform imputation if required.
+1. Normalize to resolve numeric feature skewness.
+1. Standardize (center and scale) numeric features.
+1. Perform dimension reduction (e.g. PCA) on numeric features.
+1. Dummy (unordereed) or label (ordered) encode categorical features.
+
+#### Data leakage
+
+In order to avoid data leakage, feature engineering should be done in every resampling set.
+
+#### Putting the process together
+
+We first create a blueprint (recipe) with all the steps we want to apply on the data.
+
+```{r message=FALSE}
+blueprint <- 
+    ames_train %>% 
+    recipes::recipe(
+        Sale_Price ~ .) %>% 
+    recipes::step_nzv(
+        recipes::all_nominal()) %>% 
+    recipes::step_integer(
+        matches(
+            "Qual|Cond|QC|Qu")) %>% 
+    recipes::step_center(
+        recipes::all_numeric(),
+        - recipes::all_outcomes()) %>% 
+    recipes::step_scale(
+        recipes::all_numeric(),
+        - recipes::all_outcomes()) %>% 
+    recipes::step_dummy(
+        recipes::all_nominal(),
+        - recipes::all_outcomes(),
+        one_hot = TRUE)
+```
+
+These steps are just a specification, but in order to apply some of the steps, there are some statistics that need to be calculated over the actual dataset. These are calculated with the `prep` function.
+
+```{r}
+prepare <- 
+    blueprint %>% 
+    recipes::prep(training = ames_train)
+```
+
+Finally the full transformation can be applied over the test and training datasets using the `bake` function.
+
+```{r}
+baked_train <- prepare %>% 
+    recipes::bake(
+        new_data = ames_train)
+
+baked_test <- prepare %>% 
+    recipes::bake(
+        new_data = ames_test)
+```
+
+The (old) `caret` packages allows to explore a whole model tuning process. For instance:
+
+- Try the k-nearest neighbor model over the `ames` dataset.
+- Explore what's the hyper-parameter `k` with the best result.
+- Do this over a cross-validation set, before going to the test data.
+- Take into account the previous blueprint transformations for mdoel efficiency.
+
+```{r cache=TRUE}
+cv <- caret::trainControl(
+    method = "repeatedcv",
+    number = 10,
+    repeats = 5)
+
+hyper_grid <- expand.grid(
+    k = seq(2, 25, by = 1))
+
+knn_fit <- caret::train(
+    blueprint,
+    data = ames_train,
+    method = "knn",
+    trControl = cv,
+    tuneGrid = hyper_grid,
+    metric = "RMSE")
+
+knn_fit
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
