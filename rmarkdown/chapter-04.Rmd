@@ -25,10 +25,17 @@ We'll generate training and test samples with the same structure as in last chap
 ames <- 
     AmesHousing::make_ames()
 
+# Outcome variable has to be manipulated outside of the model recipe
+
+ames_preprocessed <- 
+    ames %>% 
+    mutate(
+        Sale_Price = log10(Sale_Price))
+
 set.seed(123)
 
 split_01 <- 
-    ames %>% 
+    ames_preprocessed %>% 
     rsample::initial_split(prop = 0.7)
 
 ames_train <- 
@@ -77,9 +84,7 @@ If we wanted to replicate this modelling with the `tidymodels` package instead, 
 recipe_01 <- 
     recipes::recipe(
         Sale_Price ~ Gr_Liv_Area,
-        data = ames_train) %>% 
-    recipes::step_log(
-        recipes::all_outcomes())
+        data = ames_train)
 
 model_01 <- 
     parsnip::linear_reg() %>% 
@@ -129,9 +134,7 @@ With `tidymodels` this would be done with:
 recipe_02 <- 
     recipes::recipe(
         Sale_Price ~ Gr_Liv_Area + Year_Built,
-        data = ames_train) %>% 
-    recipes::step_log(
-        recipes::all_outcomes())
+        data = ames_train)
 
 model_02 <- 
     model_01
@@ -172,8 +175,6 @@ recipe_03 <-
     recipes::recipe(
         Sale_Price ~ .,
         data = ames_train) %>% 
-    recipes::step_log(
-        recipes::all_outcomes()) %>% 
     recipes::step_factor2string(
         recipes::all_factor_predictors()) %>%
     recipes::step_string2factor(
@@ -461,15 +462,19 @@ gridExtra::grid.arrange(
 A linear regression model assumes residuals have constant variance across observations. The following charts show how the assumption is violated in the simple regression model with only one variable.
 
 ```{r}
-df_01 <- broom::augment(
-    cv_model_01$finalModel,
-    data = ames_train)
+df_01 <- 
+    model_wf_fit_01 %>% 
+    broom::augment( 
+        new_data = ames_train) %>% 
+    mutate(
+        .resid = Sale_Price - .pred)
 
 p11 <- ggplot(
     data = df_01,
     mapping = aes(
-        x = .fitted,
-        y = .resid))
+        x = .pred,
+        y = .resid)) + 
+    geom_point()
 
 df_02 <- broom::augment(
     cv_model_02)
@@ -601,7 +606,7 @@ The interpretation of features in linear regression models is straight-forward. 
 The `vip` package allows to visualize the most important variables in a linear regresion model.
 
 ```{r}
-vip::vip(model_wf_03)
+vip::vip(model_wf_fit_03)
 ```
 
 
